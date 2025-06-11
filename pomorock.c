@@ -1,7 +1,7 @@
-// tomato.c
+// pomorock.c
 
 /*
- * Tomato - Pomodoro-style focus timer
+ * Pomorock - Pomodoro-style focus timer
  *
  * Copyright 2025 Manuel Prieto-Matias
  * Inspired by tomatoshell (https://github.com/LytixDev/tomatoshell)

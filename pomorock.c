@@ -2,11 +2,12 @@
 
 /*
  * Pomorock - Pomodoro-style focus timer
- *
+ * A useful program to learn about Unix processes, signals, multiplexed I/O
+ * and interprocess communications
  * Copyright 2025 Manuel Prieto-Matias
  * Inspired by tomatoshell (https://github.com/LytixDev/tomatoshell)
  * by Nicolai Brand (2022), licensed under GPL.
- * 
+ *
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by
@@ -35,16 +36,22 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
+#define MAXARGPLAYER 5 // argumentos que recibe el audio player
 
-#define ALARMSONG "./pomorock.mp3"
+#define ALARMSONG "./pomorock.mp3" // Este es el mp3 file que suena al vencer el pomodoro
+#define AMBIENTSONG "./ambient.mp3" // Si se activa musica de ambiente esto esta es la musica que sonora de fondo
+#define LOGFILE "./pomolog.csv" // Fichero de log donde ir guardando el progreso
 
 // Configuración por defecto
 int session_time = 50 * 60; // Tiempo de la sesion en segundos, por defecto 50 minutos
 int break_time = 5 * 60;    // Tiempo del descanso en segundos, por defecto 5 minutos
-int total_sessions = 3;
+int total_sessions = 3;     // Numero de sesiones antes e finalizar
+
 char *alarm_file = NULL;
+char *ambient_file = NULL;
+
 char *log_file = NULL;
-char *audio_player = NULL;
+char *audio_player[MAXARGPLAYER] = {NULL}; // MAXARGPLAYER-1 argumentos + NULL
 
 // Terminal original
 struct termios orig_termios;
@@ -53,32 +60,36 @@ struct termios orig_termios;
 void usage(const char *progname);
 void parse_args(int argc, char *argv[]);
 void find_audio_player();
-void run_timer(int duration, const char *message);
+void run_timer(int duration, const char *message, char *song);
 void play_alarm();
+void play_ambient();
 void write_log();
 void total_hours_used();
 void cleanup();
 void handle_sigint(int sig);
 
 int main(int argc, char *argv[]) {
-    signal(SIGINT, handle_sigint);
+
+    signal(SIGINT, handle_sigint);  // manejamos la señal SIGINT
     tcgetattr(STDIN_FILENO, &orig_termios); // Guardar configuración terminal
+
+
     parse_args(argc, argv);
     find_audio_player();
 
     // Desactivar eco y cursor
     struct termios raw = orig_termios;
-    raw.c_lflag &= ~(ECHO);
+    raw.c_lflag &= ~(ECHO | ICANON); //modo sin eco y sin buffer de línea
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
     printf("\e[?25l"); // ocultar cursor
 
     for (int i = 1; i <= total_sessions; ++i) {
         printf("🍅 Session %d/%d starting...\n", i, total_sessions);
-        run_timer(session_time, "Session");
+        run_timer(session_time, "Session",ambient_file);
 
         if (i < total_sessions) {
             printf("🌿 Break starting...\n");
-            run_timer(break_time, "Break");
+            run_timer(break_time, "Break",alarm_file);
         }
     }
 
@@ -104,55 +115,83 @@ void parse_args(int argc, char *argv[]) {
             default: usage(argv[0]);
         }
     }
-
-    alarm_file = strdup("./pomorock.mp3");
-    log_file = strdup("./pomolog.csv");
+    // TODO, config via options
+    alarm_file = strdup(ALARMSONG);
+    log_file = strdup(LOGFILE);
+    ambient_file =strdup(AMBIENTSONG);
 }
 
 void find_audio_player() {
     // Probar algunos reproductores comunes
-    if (!access("/usr/bin/mpv", X_OK)) audio_player = "mpv";
-    else if (!access("/usr/bin/paplay", X_OK)) audio_player = "paplay";
-    else if (!access("/usr/bin/pw-play", X_OK)) audio_player = "pw-play";
-    else if (!access("/usr/bin/aplay", X_OK)) audio_player = "aplay";
-    else audio_player = NULL;
+    if (!access("/usr/bin/mpv", X_OK)) {
+        audio_player[0] = "mpv";
+        audio_player[1] = "--really-quiet";
+        audio_player[2] = "--loop=inf";
+        audio_player[3] = NULL; //song
+        audio_player[4] = NULL;
+
+    // TODO, review options for loop playing in paplay, pw-play and aplay
+    // else if (!access("/usr/bin/paplay", X_OK)) audio_player = "paplay";
+    // else if (!access("/usr/bin/pw-play", X_OK)) audio_player = "pw-play";
+    // else if (!access("/usr/bin/aplay", X_OK)) audio_player = "aplay";
+    } else {
+        audio_player[0] = NULL;
+    }
 }
 
-void run_timer(int duration, const char *message) {
-    // TODO: Mostrar temporizador con cuenta regresiva
-    // TODO: Leer tecla 's' para saltar o 'q' para salir anticipadamente
-    // TODO: Notificaciones opcionales
-    // TODO: Musica de fondo
-
+void run_timer(int duration, const char *message, char *song) {
     time_t start = time(NULL);
-    while (time(NULL) - start < duration) {
-        // TODO: Imprimir tiempo restante
-        sleep(1);
+    pid_t music_pid = -1;
+
+    // Lanzar música de fondo si hay reproductor y mp3 disponible
+    if (audio_player[0] && song) {
+        music_pid = fork();
+        if (music_pid == 0) {
+            // Proceso hijo: reproducir música en segundo plano
+            audio_player[3]=song;
+            execvp(audio_player[0], audio_player);
+            exit(EXIT_FAILURE); // Si falla execlp
+        }
     }
 
-    printf("%s finished!\n", message);
-    play_alarm();
-}
+    // Temporizador con cuenta atrás simple
+    while (time(NULL) - start < duration) {
+        int remaining = duration - (int)(time(NULL) - start);
+        int minutes = remaining / 60;
+        int seconds = remaining % 60;
 
-void play_alarm() {
-    if (!audio_player || !alarm_file) return;
+        printf("\r⏳ %02d:%02d remaining... ", minutes, seconds);
+        fflush(stdout);
 
-    pid_t pid = fork();
-    if (pid == 0) {
-        execlp(audio_player, audio_player, alarm_file, (char *)NULL);
-        _exit(EXIT_FAILURE); // por si falla execlp
-    } else if (pid > 0) {
-        printf("Press 's' to stop alarm.\n");
-        while (1) {
-            char c = getchar();
-            if (c == 's') {
-                kill(pid, SIGKILL);
-                waitpid(pid, NULL, 0);
-                break;
+        // Ver si el usuario pulsa 's' o 'q'
+        fd_set read_fds;
+        struct timeval tv = {1, 0}; // Esperar máximo 1s
+
+        FD_ZERO(&read_fds);
+        FD_SET(STDIN_FILENO, &read_fds);
+
+        if (select(STDIN_FILENO + 1, &read_fds, NULL, NULL, &tv) > 0) {
+            char c;
+            ssize_t n = read(STDIN_FILENO, &c, 1);
+            if (n > 0) {
+                if (c == 's') break;
+                if (c == 'q') {
+                    if (music_pid > 0) kill(music_pid, SIGKILL); //mandamos SIGKILL al hijo
+                    waitpid(music_pid, NULL, 0);
+                    cleanup();
+                    exit(0);
+                }
             }
         }
     }
+    printf("\n%s finished!\n", message);
+    // Terminar música de fondo si aún está sonando
+    if (music_pid > 0) {
+        kill(music_pid, SIGKILL);
+        waitpid(music_pid, NULL, 0);
+    }
 }
+
 
 void write_log() {
     FILE *f = fopen(log_file, "a");
@@ -178,12 +217,18 @@ void total_hours_used() {
 }
 
 void cleanup() {
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios); // Restaurar terminal
-    printf("\e[?25h"); // mostrar cursor
+
+    // Restaurar terminal
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
+
+    // Mostrar el cursor (en caso de que lo ocultaras)
+    printf("\e[?25h");
+
+    fflush(stdout);
 }
 
 void handle_sigint(int sig) {
     cleanup();
-    printf("\nExiting.\n");
+    printf("\n\033[0;31m⛔ Interrumpido con Ctrl+C\033[0m\n");
     exit(0);
 }
